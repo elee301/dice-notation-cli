@@ -54,16 +54,28 @@ next to your rolls in a file.
 
 ```
 expr := term (('+' | '-') term)*
-term := [count] 'd' sides | number
+term := [count] 'd' sides [modifier] | number
+modifier := ('kh' | 'kl' | 'dh' | 'dl') [n]
 ```
 
 - `count` defaults to 1 if omitted, so `d20` means `1d20`.
 - Whitespace anywhere in the expression is ignored (`2d6 + 3` also works).
 - Terms are evaluated left to right; there's no operator precedence to
   worry about since `+` and `-` are the only operators.
+- A dice term can carry one keep/drop modifier: `kh` (keep highest), `kl`
+  (keep lowest), `dh` (drop highest), or `dl` (drop lowest), each followed
+  by an optional count that defaults to 1. `4d6kh3` rolls four d6 and keeps
+  the best three; `2d20dl1` rolls two d20 and drops the lower one (a
+  disadvantage roll). Dropped dice still show up in the output, in
+  parentheses, so you can see what was discarded:
 
-Things this does *not* support yet: keep/drop-highest modifiers, rerolls,
-exploding dice. See the notes in `src/dice.rs` if you want to add one.
+```
+$ diceroll 4d6kh3
+4d6kh3: [5, 4, (2), 6] = 15
+```
+
+Things this does *not* support yet: rerolls, exploding dice. See the notes
+in `src/dice.rs` if you want to add one.
 
 ## Building
 
