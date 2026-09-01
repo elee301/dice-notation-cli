@@ -13,6 +13,7 @@ fn print_usage() {
     eprintln!("       echo '2d6+3' | diceroll     (no args also reads stdin)");
     eprintln!();
     eprintln!("Each line is one dice expression, e.g. 3d6+2, d20-1, 4d4+2d6-3.");
+    eprintln!("Append '!' after the side count for exploding dice, e.g. 3d6!.");
     eprintln!("Blank lines and lines starting with '#' are skipped.");
 }
 

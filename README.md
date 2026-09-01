@@ -54,7 +54,7 @@ next to your rolls in a file.
 
 ```
 expr := term (('+' | '-') term)*
-term := [count] 'd' sides [modifier] | number
+term := [count] 'd' sides ['!'] [modifier] | number
 modifier := ('kh' | 'kl' | 'dh' | 'dl') [n]
 ```
 
@@ -74,8 +74,22 @@ $ diceroll 4d6kh3
 4d6kh3: [5, 4, (2), 6] = 15
 ```
 
-Things this does *not* support yet: rerolls, exploding dice. See the notes
-in `src/dice.rs` if you want to add one.
+- A dice term can also explode by appending `!` right after the side count:
+  each die that lands on its maximum face is rolled again, and the extra
+  roll is added on. This can chain, so a single die may explode more than
+  once. A d1 can't explode (every roll is already its max), so `d1!` is a
+  parse error. Exploded rolls are shown chained together with `+`:
+
+```
+$ diceroll 3d6!
+3d6!: [6+4, 2, 6+6+1] = 25
+```
+
+`!` and a keep/drop modifier can be combined, e.g. `4d6!kh3`; the modifier
+looks at each die's exploded total, not its individual rolls.
+
+Things this does *not* support yet: rerolling individual dice below a
+threshold. See the notes in `src/dice.rs` if you want to add it.
 
 ## Building
 

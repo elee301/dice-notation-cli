@@ -7,6 +7,7 @@ pub enum Term {
     Dice {
         count: u32,
         sides: u32,
+        explode: bool,
         modifier: Option<Modifier>,
     },
     Constant(i64),
@@ -102,7 +103,7 @@ fn parse_modifier(
 /// Parses expressions like "2d6+3", "d20", or "4d4-1+2d6".
 ///
 /// Grammar, roughly: expr := term (('+' | '-') term)*
-///                    term := [count] 'd' sides ['kh' | 'kl' | 'dh' | 'dl' [n]] | number
+///                    term := [count] 'd' sides ['!'] ['kh' | 'kl' | 'dh' | 'dl' [n]] | number
 /// Whitespace anywhere in the input is ignored.
 pub fn parse(input: &str) -> Result<Expression, ParseError> {
     let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
@@ -154,11 +155,23 @@ pub fn parse(input: &str) -> Result<Expression, ParseError> {
                     .map_err(|_| ParseError(format!("dice count '{}' is out of range", count_str)))?
             };
 
+            let explode = if i < chars.len() && chars[i] == '!' {
+                if sides == 1 {
+                    return Err(ParseError(
+                        "a d1 can't explode, it always rolls its max".to_string(),
+                    ));
+                }
+                i += 1;
+                true
+            } else {
+                false
+            };
+
             let modifier = parse_modifier(&cleaned, &chars, &mut i, count)?;
 
             terms.push(SignedTerm {
                 negative,
-                term: Term::Dice { count, sides, modifier },
+                term: Term::Dice { count, sides, explode, modifier },
             });
         } else {
             if count_str.is_empty() {
@@ -200,21 +213,40 @@ pub fn parse(input: &str) -> Result<Expression, ParseError> {
 }
 
 pub enum TermDetail {
-    Dice { rolls: Vec<u32>, kept: Vec<bool> },
+    /// Each entry in `groups` is one die: a single roll, or a chain of rolls
+    /// if it exploded. `kept` has one entry per group, decided by summing
+    /// each group before applying any keep/drop modifier.
+    Dice { groups: Vec<Vec<u32>>, kept: Vec<bool> },
     Constant(i64),
 }
 
-/// Decides which of `rolls` survive a keep/drop modifier. Ties are broken by
+/// A die keeps exploding as long as it lands on its max face. Capped so a
+/// long run of max rolls can't turn one line of input into an unbounded loop.
+const MAX_EXPLOSIONS_PER_DIE: u32 = 100;
+
+fn roll_group(rng: &mut Rng, sides: u32, explode: bool) -> Vec<u32> {
+    let mut group = vec![rng.roll_die(sides)];
+    if explode {
+        let mut explosions = 0;
+        while *group.last().unwrap() == sides && explosions < MAX_EXPLOSIONS_PER_DIE {
+            group.push(rng.roll_die(sides));
+            explosions += 1;
+        }
+    }
+    group
+}
+
+/// Decides which of `sums` survive a keep/drop modifier. Ties are broken by
 /// original position, since the sort below is stable.
-fn kept_mask(rolls: &[u32], modifier: Option<Modifier>) -> Vec<bool> {
-    let mut kept = vec![true; rolls.len()];
+fn kept_mask(sums: &[i64], modifier: Option<Modifier>) -> Vec<bool> {
+    let mut kept = vec![true; sums.len()];
     let Some(modifier) = modifier else {
         return kept;
     };
 
-    let mut by_value: Vec<usize> = (0..rolls.len()).collect();
-    by_value.sort_by_key(|&i| rolls[i]);
-    let n = rolls.len();
+    let mut by_value: Vec<usize> = (0..sums.len()).collect();
+    by_value.sort_by_key(|&i| sums[i]);
+    let n = sums.len();
 
     let drop = match modifier {
         Modifier::KeepHighest(k) => &by_value[..n - (k as usize).min(n)],
@@ -245,19 +277,22 @@ impl Expression {
 
         for signed in &self.terms {
             match signed.term {
-                Term::Dice { count, sides, modifier } => {
-                    let rolls: Vec<u32> = (0..count).map(|_| rng.roll_die(sides)).collect();
-                    let kept = kept_mask(&rolls, modifier);
-                    let sum: i64 = rolls
+                Term::Dice { count, sides, explode, modifier } => {
+                    let groups: Vec<Vec<u32>> =
+                        (0..count).map(|_| roll_group(rng, sides, explode)).collect();
+                    let sums: Vec<i64> =
+                        groups.iter().map(|g| g.iter().map(|&r| r as i64).sum()).collect();
+                    let kept = kept_mask(&sums, modifier);
+                    let sum: i64 = sums
                         .iter()
                         .zip(&kept)
                         .filter(|&(_, &k)| k)
-                        .map(|(&r, _)| r as i64)
+                        .map(|(&s, _)| s)
                         .sum();
                     total += if signed.negative { -sum } else { sum };
                     terms.push(TermRoll {
                         negative: signed.negative,
-                        detail: TermDetail::Dice { rolls, kept },
+                        detail: TermDetail::Dice { groups, kept },
                     });
                 }
                 Term::Constant(value) => {
@@ -285,11 +320,15 @@ impl fmt::Display for RollResult {
                 write!(f, " {} ", if term.negative { "-" } else { "+" })?;
             }
             match &term.detail {
-                TermDetail::Dice { rolls, kept } => {
-                    let parts: Vec<String> = rolls
+                TermDetail::Dice { groups, kept } => {
+                    let parts: Vec<String> = groups
                         .iter()
                         .zip(kept)
-                        .map(|(r, &k)| if k { r.to_string() } else { format!("({})", r) })
+                        .map(|(g, &k)| {
+                            let joined: Vec<String> = g.iter().map(u32::to_string).collect();
+                            let joined = joined.join("+");
+                            if k { joined } else { format!("({})", joined) }
+                        })
                         .collect();
                     write!(f, "[{}]", parts.join(", "))?;
                 }
