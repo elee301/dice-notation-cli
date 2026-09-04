@@ -54,7 +54,7 @@ next to your rolls in a file.
 
 ```
 expr := term (('+' | '-') term)*
-term := [count] 'd' sides ['!'] [modifier] | number
+term := [count] 'd' sides ['!'] ['r' n] [modifier] | number
 modifier := ('kh' | 'kl' | 'dh' | 'dl') [n]
 ```
 
@@ -88,8 +88,19 @@ $ diceroll 3d6!
 `!` and a keep/drop modifier can be combined, e.g. `4d6!kh3`; the modifier
 looks at each die's exploded total, not its individual rolls.
 
-Things this does *not* support yet: rerolling individual dice below a
-threshold. See the notes in `src/dice.rs` if you want to add it.
+- A dice term can reroll low results by appending `r` and a threshold right
+  after the side count (or after `!`, if both are used): any die landing at
+  or below that threshold is rerolled once, and the new result is what
+  counts. This is a single reroll, not a loop until you clear the
+  threshold - `4d6r2` re-rolls any 1 or 2, but a rerolled die is never
+  rerolled a second time even if it comes up low again. The threshold must
+  be less than the number of sides, so `d6r6` (which would reroll every
+  die) is a parse error. Rerolled dice show both values in the output:
+
+```
+$ diceroll 4d6r2
+4d6r2: [1→5, 4, 2→6, 3] = 18
+```
 
 ## Building
 

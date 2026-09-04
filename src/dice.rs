@@ -8,6 +8,7 @@ pub enum Term {
         count: u32,
         sides: u32,
         explode: bool,
+        reroll: Option<u32>,
         modifier: Option<Modifier>,
     },
     Constant(i64),
@@ -103,7 +104,7 @@ fn parse_modifier(
 /// Parses expressions like "2d6+3", "d20", or "4d4-1+2d6".
 ///
 /// Grammar, roughly: expr := term (('+' | '-') term)*
-///                    term := [count] 'd' sides ['!'] ['kh' | 'kl' | 'dh' | 'dl' [n]] | number
+///                    term := [count] 'd' sides ['!'] ['r' n] ['kh' | 'kl' | 'dh' | 'dl' [n]] | number
 /// Whitespace anywhere in the input is ignored.
 pub fn parse(input: &str) -> Result<Expression, ParseError> {
     let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
@@ -167,11 +168,42 @@ pub fn parse(input: &str) -> Result<Expression, ParseError> {
                 false
             };
 
+            let reroll = if i < chars.len() && chars[i] == 'r' {
+                let start = i;
+                i += 1;
+                let threshold_start = i;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let threshold_str = &cleaned[threshold_start..i];
+                if threshold_str.is_empty() {
+                    return Err(ParseError(format!(
+                        "expected a number after 'r' at position {}",
+                        start
+                    )));
+                }
+                let threshold: u32 = threshold_str.parse().map_err(|_| {
+                    ParseError(format!("reroll threshold '{}' is out of range", threshold_str))
+                })?;
+                if threshold == 0 {
+                    return Err(ParseError("reroll threshold must be at least 1".to_string()));
+                }
+                if threshold >= sides {
+                    return Err(ParseError(format!(
+                        "reroll threshold {} must be less than the number of sides ({})",
+                        threshold, sides
+                    )));
+                }
+                Some(threshold)
+            } else {
+                None
+            };
+
             let modifier = parse_modifier(&cleaned, &chars, &mut i, count)?;
 
             terms.push(SignedTerm {
                 negative,
-                term: Term::Dice { count, sides, explode, modifier },
+                term: Term::Dice { count, sides, explode, reroll, modifier },
             });
         } else {
             if count_str.is_empty() {
@@ -215,8 +247,10 @@ pub fn parse(input: &str) -> Result<Expression, ParseError> {
 pub enum TermDetail {
     /// Each entry in `groups` is one die: a single roll, or a chain of rolls
     /// if it exploded. `kept` has one entry per group, decided by summing
-    /// each group before applying any keep/drop modifier.
-    Dice { groups: Vec<Vec<u32>>, kept: Vec<bool> },
+    /// each group before applying any keep/drop modifier. `rerolled` holds
+    /// the discarded original roll for any die that triggered a reroll; it
+    /// does not count toward the group's sum.
+    Dice { groups: Vec<Vec<u32>>, kept: Vec<bool>, rerolled: Vec<Option<u32>> },
     Constant(i64),
 }
 
@@ -224,8 +258,21 @@ pub enum TermDetail {
 /// long run of max rolls can't turn one line of input into an unbounded loop.
 const MAX_EXPLOSIONS_PER_DIE: u32 = 100;
 
-fn roll_group(rng: &mut Rng, sides: u32, explode: bool) -> Vec<u32> {
-    let mut group = vec![rng.roll_die(sides)];
+/// Rolls one die, applying at most one reroll (if its first result is at or
+/// below `reroll`'s threshold) before any explosion chain. Returns the final
+/// roll chain along with the discarded original roll, if a reroll happened.
+fn roll_group(rng: &mut Rng, sides: u32, explode: bool, reroll: Option<u32>) -> (Vec<u32>, Option<u32>) {
+    let mut first = rng.roll_die(sides);
+    let discarded = match reroll {
+        Some(threshold) if first <= threshold => {
+            let original = first;
+            first = rng.roll_die(sides);
+            Some(original)
+        }
+        _ => None,
+    };
+
+    let mut group = vec![first];
     if explode {
         let mut explosions = 0;
         while *group.last().unwrap() == sides && explosions < MAX_EXPLOSIONS_PER_DIE {
@@ -233,7 +280,7 @@ fn roll_group(rng: &mut Rng, sides: u32, explode: bool) -> Vec<u32> {
             explosions += 1;
         }
     }
-    group
+    (group, discarded)
 }
 
 /// Decides which of `sums` survive a keep/drop modifier. Ties are broken by
@@ -277,9 +324,11 @@ impl Expression {
 
         for signed in &self.terms {
             match signed.term {
-                Term::Dice { count, sides, explode, modifier } => {
-                    let groups: Vec<Vec<u32>> =
-                        (0..count).map(|_| roll_group(rng, sides, explode)).collect();
+                Term::Dice { count, sides, explode, reroll, modifier } => {
+                    let rolls: Vec<(Vec<u32>, Option<u32>)> =
+                        (0..count).map(|_| roll_group(rng, sides, explode, reroll)).collect();
+                    let (groups, rerolled): (Vec<Vec<u32>>, Vec<Option<u32>>) =
+                        rolls.into_iter().unzip();
                     let sums: Vec<i64> =
                         groups.iter().map(|g| g.iter().map(|&r| r as i64).sum()).collect();
                     let kept = kept_mask(&sums, modifier);
@@ -292,7 +341,7 @@ impl Expression {
                     total += if signed.negative { -sum } else { sum };
                     terms.push(TermRoll {
                         negative: signed.negative,
-                        detail: TermDetail::Dice { groups, kept },
+                        detail: TermDetail::Dice { groups, kept, rerolled },
                     });
                 }
                 Term::Constant(value) => {
@@ -320,13 +369,18 @@ impl fmt::Display for RollResult {
                 write!(f, " {} ", if term.negative { "-" } else { "+" })?;
             }
             match &term.detail {
-                TermDetail::Dice { groups, kept } => {
+                TermDetail::Dice { groups, kept, rerolled } => {
                     let parts: Vec<String> = groups
                         .iter()
                         .zip(kept)
-                        .map(|(g, &k)| {
+                        .zip(rerolled)
+                        .map(|((g, &k), r)| {
                             let joined: Vec<String> = g.iter().map(u32::to_string).collect();
                             let joined = joined.join("+");
+                            let joined = match r {
+                                Some(original) => format!("{}\u{2192}{}", original, joined),
+                                None => joined,
+                            };
                             if k { joined } else { format!("({})", joined) }
                         })
                         .collect();
